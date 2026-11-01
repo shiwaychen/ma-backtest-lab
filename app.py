@@ -7,7 +7,8 @@
 内置策略（同一回测口径，可切换对比）：
   1. 双均线：短期均线从下往上穿过长期均线（金叉）→ 全仓买入；死叉 → 全部卖出
   2. MACD：DIF（快慢 EMA 之差）在其信号线 DEA 上方 → 持有；下方 → 空仓
-  3. 只做现货多头：不加杠杆、不做空
+  3. 唐奇安通道：收盘突破前 20 日最高价 → 买入；跌破前 10 日最低价 → 卖出
+  4. 只做现货多头：不加杠杆、不做空
 
 回测口径（诚实原则）：
   - 信号在当天收盘确认，按【第二天开盘价】成交（防"未来函数"，不偷看未来）
@@ -74,6 +75,23 @@ def macd_hold(df, fast, slow, signal):
            - df["close"].ewm(span=slow, adjust=False).mean())
     dea = dif.ewm(span=signal, adjust=False).mean()
     return dif > dea
+
+
+def donchian_hold(df, entry, exit_):
+    """唐奇安通道（海龟规则）：收盘突破前 entry 日最高价 → 买入持有；
+    跌破前 exit_ 日最低价 → 离场。带状态的信号，逐日推进。"""
+    hi = df["close"].shift(1).rolling(entry).max()
+    lo = df["close"].shift(1).rolling(exit_).min()
+    state = False
+    out = []
+    for cl, h, l in zip(df["close"], hi, lo):
+        if pd.notna(h) and pd.notna(l):
+            if not state and cl > h:
+                state = True
+            elif state and cl < l:
+                state = False
+        out.append(state)
+    return pd.Series(out, index=df.index)
 
 
 def run_backtest(df, hold):
@@ -153,8 +171,8 @@ with st.sidebar:
     symbol_label = st.selectbox("交易对 / 代币股", list(SYMBOLS.keys()))
     symbol = SYMBOLS[symbol_label]
     days = st.select_slider("回测天数", options=[365, 730, 1095], value=1095)
-    strategy = st.selectbox("策略", ["双均线（金叉 / 死叉）", "MACD"])
-    sig = None
+    strategy = st.selectbox("策略", ["双均线（金叉 / 死叉）", "MACD", "唐奇安通道（突破）"])
+    sig = entry = exit_ = None
     if strategy.startswith("双均线"):
         fast = st.slider("快线周期 FAST", 5, 60, 20)
         slow = st.slider("慢线周期 SLOW", 20, 150, 60)
@@ -163,7 +181,7 @@ with st.sidebar:
             slow = fast + 10
         strat_name = f"双均线 {fast}/{slow}"
         plot_name = f"MA {fast}/{slow}"
-    else:
+    elif strategy.startswith("MACD"):
         fast = st.slider("MACD 快线 EMA", 5, 30, 12)
         slow = st.slider("MACD 慢线 EMA", 20, 60, 26)
         sig = st.slider("信号线 DEA", 3, 20, 9)
@@ -172,6 +190,15 @@ with st.sidebar:
             slow = fast + 10
         strat_name = f"MACD {fast}/{slow}/{sig}"
         plot_name = strat_name
+    else:
+        entry = st.slider("入场周期（突破前 N 日最高）", 10, 40, 20)
+        exit_ = st.slider("出场周期（跌破前 N 日最低）", 5, 30, 10)
+        if exit_ >= entry:
+            st.warning("出场周期必须短于入场周期（海龟原版如此），已自动把出场调整为入场的一半。")
+            exit_ = max(5, entry // 2)
+        slow = entry  # 数据长度守卫按最长窗口（入场周期）判断
+        strat_name = f"唐奇安 {entry}/{exit_}"
+        plot_name = f"Donchian {entry}/{exit_}"
 
 with st.spinner("正在拉取行情并回测..."):
     data = fetch_klines(symbol, days)
@@ -183,8 +210,10 @@ with st.spinner("正在拉取行情并回测..."):
         st.stop()
     if strategy.startswith("双均线"):
         hold = ma_hold(data, fast, slow)
-    else:
+    elif strategy.startswith("MACD"):
         hold = macd_hold(data, fast, slow, sig)
+    else:
+        hold = donchian_hold(data, entry, exit_)
     result, trades = run_backtest(data, hold)
 
 strat_final = result["equity"].iloc[-1]
@@ -234,6 +263,12 @@ st.info(
     "最大回撤 −34.6%、43 笔交易、胜率 40%——比双均线更灵敏，本窗口收益更高。\n\n"
     "但这仍是单市场、单窗口的样本内结果，只能说明“值得继续对比”，"
     "不能下结论说 MACD 强于双均线。换标的、换时段，排名可能反转。"
+)
+st.info(
+    "唐奇安通道（20/10，海龟规则）同窗口实测：收益 +102.8%、最大回撤 −27.1%、"
+    "22 笔交易、胜率 36%——本窗口最接近买入持有的收益，回撤却只有约一半。\n\n"
+    "注意：胜率依然只有 36%，靠的还是少数大趋势单。它在本窗口占优很可能"
+    "因为这段行情趋势性强；横盘市里假突破会连续小亏（与双均线同病）。"
 )
 st.caption("数据来源：币安公开接口。回测不等于实盘：回测没有滑点和情绪，"
            "它的用途是淘汰明显不行的规则，而不是证明能赚钱。本项目仅供学习研究。")
