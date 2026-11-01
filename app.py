@@ -105,9 +105,43 @@ st.markdown(
     "信号次日开盘成交（防未来函数），手续费 0.1%，对照组为买入持有。"
 )
 
+# 下拉框显示名 → 币安现货真实代码。
+# 代币股（bStocks）在币安的代码是「代码 + B + USDT」，如 NVDA → NVDABUSDT，
+# 且 2026 年才上线，历史最多约 144 天，样本小、结论仅供练手。
+SYMBOLS = {
+    # 加密货币（历史长，3 年日线齐全）
+    "BTC 比特币": "BTCUSDT",
+    "ETH 以太坊": "ETHUSDT",
+    "SOL 索拉纳": "SOLUSDT",
+    "BNB 币安币": "BNBUSDT",
+    "XRP 瑞波": "XRPUSDT",
+    "DOGE 狗狗币": "DOGEUSDT",
+    "ADA 艾达币": "ADAUSDT",
+    "LINK 预言机": "LINKUSDT",
+    "AVAX 雪崩": "AVAXUSDT",
+    "LTC 莱特币": "LTCUSDT",
+    # 代币股 bStocks（历史约 96–144 天，样本小）
+    "NVDA 英伟达·代币股": "NVDABUSDT",
+    "TSLA 特斯拉·代币股": "TSLABUSDT",
+    "SNDK 闪迪·代币股": "SNDKBUSDT",
+    "MU 美光·代币股": "MUBUSDT",
+    "SPCX SpaceX·代币股": "SPCXBUSDT",
+    "AMD·代币股": "AMDBUSDT",
+    "INTC 英特尔·代币股": "INTCBUSDT",
+    "QQQ 纳指ETF·代币股": "QQQBUSDT",
+    "META·代币股": "METABUSDT",
+    "MSFT 微软·代币股": "MSFTBUSDT",
+    "GOOGL 谷歌·代币股": "GOOGLBUSDT",
+    "SPY 标普ETF·代币股": "SPYBUSDT",
+    "SKHY SK海力士·代币股": "SKHYBUSDT",
+    "AMZN 亚马逊·代币股": "AMZNBUSDT",
+    "AAPL 苹果·代币股": "AAPLBUSDT",
+}
+
 with st.sidebar:
     st.header("参数")
-    symbol = st.selectbox("交易对", ["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+    symbol_label = st.selectbox("交易对 / 代币股", list(SYMBOLS.keys()))
+    symbol = SYMBOLS[symbol_label]
     days = st.select_slider("回测天数", options=[365, 730, 1095], value=1095)
     fast = st.slider("快线周期 FAST", 5, 60, 20)
     slow = st.slider("慢线周期 SLOW", 20, 150, 60)
@@ -117,6 +151,12 @@ with st.sidebar:
 
 with st.spinner("正在拉取行情并回测..."):
     data = fetch_klines(symbol, days)
+    if len(data) <= slow:
+        st.warning(
+            f"{symbol_label} 目前只有 {len(data)} 天历史，比慢线周期 {slow} 还短，"
+            f"算不出均线信号。把慢线调到 {max(20, len(data) // 2)} 以下再试"
+            "（代币股历史短，建议快/慢线用 10/30 或 5/20）。")
+        st.stop()
     result, trades = run_backtest(data, fast, slow)
 
 strat_final = result["equity"].iloc[-1]
