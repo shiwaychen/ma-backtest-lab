@@ -8,7 +8,9 @@
   1. 双均线：短期均线从下往上穿过长期均线（金叉）→ 全仓买入；死叉 → 全部卖出
   2. MACD：DIF（快慢 EMA 之差）在其信号线 DEA 上方 → 持有；下方 → 空仓
   3. 唐奇安通道：收盘突破前 20 日最高价 → 买入；跌破前 10 日最低价 → 卖出
-  4. 只做现货多头：不加杠杆、不做空
+  4. RSI：跌入超卖区后回升穿过 30 → 买入；冲上 70 → 卖出（均值回归）
+  5. 全部策略对比：四策略默认参数同窗口并排对比
+  6. 只做现货多头：不加杠杆、不做空
 
 回测口径（诚实原则）：
   - 信号在当天收盘确认，按【第二天开盘价】成交（防"未来函数"，不偷看未来）
@@ -94,6 +96,29 @@ def donchian_hold(df, entry, exit_):
     return pd.Series(out, index=df.index)
 
 
+def rsi_hold(df, period, oversold, overbought):
+    """RSI 均值回归：RSI 跌入超卖区后上穿 oversold → 买入（赌超卖反弹）；
+    上穿 overbought → 卖出（涨过头了）。带状态的信号，逐日推进。"""
+    delta = df["close"].diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    rs = (gain.ewm(alpha=1 / period, adjust=False).mean()
+          / loss.ewm(alpha=1 / period, adjust=False).mean())
+    rsi = 100 - 100 / (1 + rs)
+    state = False
+    out = []
+    prev = None
+    for v in rsi:
+        if pd.notna(v) and prev is not None and pd.notna(prev):
+            if not state and prev < oversold <= v:
+                state = True
+            elif state and prev < overbought <= v:
+                state = False
+        out.append(state)
+        prev = v
+    return pd.Series(out, index=df.index)
+
+
 def run_backtest(df, hold):
     """逐日模拟：信号（持仓意愿）在今天收盘确认，明天开盘成交。口径与命令行版一致。"""
     df = df.copy()
@@ -171,8 +196,10 @@ with st.sidebar:
     symbol_label = st.selectbox("交易对 / 代币股", list(SYMBOLS.keys()))
     symbol = SYMBOLS[symbol_label]
     days = st.select_slider("回测天数", options=[365, 730, 1095], value=1095)
-    strategy = st.selectbox("策略", ["双均线（金叉 / 死叉）", "MACD", "唐奇安通道（突破）"])
-    sig = entry = exit_ = None
+    strategy = st.selectbox("策略", ["双均线（金叉 / 死叉）", "MACD", "唐奇安通道（突破）",
+                                     "RSI（超买 / 超卖）", "全部策略对比（默认参数）"])
+    sig = entry = exit_ = period = oversold = overbought = None
+    compare_mode = strategy.startswith("全部")
     if strategy.startswith("双均线"):
         fast = st.slider("快线周期 FAST", 5, 60, 20)
         slow = st.slider("慢线周期 SLOW", 20, 150, 60)
@@ -190,7 +217,7 @@ with st.sidebar:
             slow = fast + 10
         strat_name = f"MACD {fast}/{slow}/{sig}"
         plot_name = strat_name
-    else:
+    elif strategy.startswith("唐奇安"):
         entry = st.slider("入场周期（突破前 N 日最高）", 10, 40, 20)
         exit_ = st.slider("出场周期（跌破前 N 日最低）", 5, 30, 10)
         if exit_ >= entry:
@@ -199,6 +226,22 @@ with st.sidebar:
         slow = entry  # 数据长度守卫按最长窗口（入场周期）判断
         strat_name = f"唐奇安 {entry}/{exit_}"
         plot_name = f"Donchian {entry}/{exit_}"
+    elif strategy.startswith("RSI"):
+        period = st.slider("RSI 周期", 7, 21, 14)
+        oversold = st.slider("超卖线（跌入后回升穿过此线买入）", 10, 40, 30)
+        overbought = st.slider("超买线（冲上此线卖出）", 60, 90, 70)
+        if oversold >= overbought:
+            st.warning("超卖线必须低于超买线，已自动调整超买线。")
+            overbought = oversold + 10
+        slow = period  # 数据长度守卫按 RSI 周期判断
+        strat_name = f"RSI {period} · {oversold}/{overbought}"
+        plot_name = f"RSI {period} ({oversold}/{overbought})"
+    else:  # 全部策略对比：固定默认参数，不显示滑块
+        fast, slow = 20, 60  # 数据长度守卫按最长窗口（慢线 60）判断
+        strat_name = "四策略对比（默认参数）"
+        plot_name = "All strategies"
+        st.caption("对比模式固定使用各策略默认参数：双均线 20/60、MACD 12/26/9、"
+                   "唐奇安 20/10、RSI 14 · 30/70，同一标的、同一窗口、同口径。")
 
 with st.spinner("正在拉取行情并回测..."):
     data = fetch_klines(symbol, days)
@@ -208,12 +251,63 @@ with st.spinner("正在拉取行情并回测..."):
             f"算不出信号。把慢线调到 {max(20, len(data) // 2)} 以下再试"
             "（代币股历史短，建议参数用更短的周期）。")
         st.stop()
+    if compare_mode:
+        holds = {
+            "双均线 20/60": ma_hold(data, 20, 60),
+            "MACD 12/26/9": macd_hold(data, 12, 26, 9),
+            "唐奇安 20/10": donchian_hold(data, 20, 10),
+            "RSI 14 · 30/70": rsi_hold(data, 14, 30, 70),
+        }
+        curves = {}
+        ascii_names = {
+            "双均线 20/60": "MA 20/60",
+            "MACD 12/26/9": "MACD 12/26/9",
+            "唐奇安 20/10": "Donchian 20/10",
+            "RSI 14 · 30/70": "RSI 14 (30/70)",
+        }
+        bh_final = None
+        rows = []
+        for name, h in holds.items():
+            res_i, trades_i = run_backtest(data, h)
+            curves[ascii_names[name]] = res_i["equity"]
+            if bh_final is None:
+                bh_final = res_i["buy_hold"]
+                bh_ret = bh_final.iloc[-1] / INIT_CASH - 1
+                bh_dd = max_drawdown(bh_final)
+            wins_i = [t for t in trades_i if t[2] > 0]
+            rows.append({
+                "策略": name,
+                "策略收益": f"{res_i['equity'].iloc[-1] / INIT_CASH - 1:+.1%}",
+                "最大回撤": f"{max_drawdown(res_i['equity']):.1%}",
+                "交易次数": len(trades_i),
+                "胜率": f"{len(wins_i) / len(trades_i):.0%}" if trades_i else "—",
+            })
+        st.caption(f"回测区间：{data['date'].iloc[0]} → {data['date'].iloc[-1]}"
+                   f"（{len(data)} 根日线）｜标的：{symbol_label}")
+        st.subheader("四策略对比（默认参数 · 同口径）")
+        st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
+        st.caption(f"对照组买入持有：收益 {bh_ret:+.1%}，最大回撤 {bh_dd:.1%}。"
+                   "样本内对比只说明各策略在本窗口的表现，不构成优劣定论；"
+                   "换标的、换时段，排名可能反转。RSI 在强趋势标的上交易次数极少，胜率不可尽信。")
+        fig2, ax2 = plt.subplots(figsize=(11, 4.6))
+        for name, eq in curves.items():
+            ax2.plot(data["date"], eq, label=name)
+        ax2.plot(data["date"], bh_final, label="Buy & hold", alpha=0.6, linestyle="--")
+        ax2.set_title(f"{symbol} strategy comparison (default params)")
+        ax2.set_ylabel("USDT")
+        ax2.legend()
+        ax2.grid(alpha=0.3)
+        fig2.tight_layout()
+        st.pyplot(fig2)
+        st.stop()
     if strategy.startswith("双均线"):
         hold = ma_hold(data, fast, slow)
     elif strategy.startswith("MACD"):
         hold = macd_hold(data, fast, slow, sig)
-    else:
+    elif strategy.startswith("唐奇安"):
         hold = donchian_hold(data, entry, exit_)
+    else:
+        hold = rsi_hold(data, period, oversold, overbought)
     result, trades = run_backtest(data, hold)
 
 strat_final = result["equity"].iloc[-1]
@@ -269,6 +363,12 @@ st.info(
     "22 笔交易、胜率 36%——本窗口最接近买入持有的收益，回撤却只有约一半。\n\n"
     "注意：胜率依然只有 36%，靠的还是少数大趋势单。它在本窗口占优很可能"
     "因为这段行情趋势性强；横盘市里假突破会连续小亏（与双均线同病）。"
+)
+st.info(
+    "RSI（14 · 30/70）同窗口实测：收益 +27.8%、最大回撤 −28.7%（四策略里最小）、"
+    "仅 4 笔交易、胜率 75%。\n\n"
+    "警告：4 笔交易撑不起任何结论——BTC 日线三年里只出现过 4 次超卖反弹机会，"
+    "75% 胜率是样本太小的假象。RSI 的价值在震荡市，需在横盘标的上另行验证。"
 )
 st.caption("数据来源：币安公开接口。回测不等于实盘：回测没有滑点和情绪，"
            "它的用途是淘汰明显不行的规则，而不是证明能赚钱。本项目仅供学习研究。")
